@@ -6,13 +6,11 @@ use std::io::{self, Write};
 use std::process::Command;
 
 // --- CONFIGURATION ---
-const INDY_VERSION: &str = "0.6.3-fix-loop-move";
+const INDY_VERSION: &str = "0.6.5-bug-fix";
 
 // --- DATA STRUCTURES ---
 
 /// Stores the state required for an active loop block.
-// FIX: Add Copy and Clone traits to prevent the "use of moved value" error (E0382)
-// when pushing the frame back onto the stack and immediately reading from it.
 #[derive(Debug, Clone, Copy)]
 struct LoopFrame {
     start_line_index: usize,
@@ -115,7 +113,7 @@ fn evaluate_condition(condition_str: &str, variables: &HashMap<String, String>) 
     } else {
         // Assume right side is a literal. Store the cleaned string in `literal_value`.
         literal_value = clean_string_value(right);
-        literal_value.as_str()
+        literal_value.as_str() // FIX: reference the newly created literal_value
     };
     
     // 3. Perform the comparison
@@ -244,6 +242,23 @@ fn execute_line(line: &str, variables: &mut HashMap<String, String>, is_verbose:
                     }
                 },
                 Err(e) => eprintln!("[Run Error] Could not execute command '{}': {}", cmd, e),
+            }
+        },
+        "import" => {
+            let target = trimmed_line.strip_prefix("import")
+                .unwrap_or("")
+                .trim();
+
+            if target == "OS_VERSION" {
+                // Get the constant OS name from the Rust environment
+                let os_name = std::env::consts::OS.to_string();
+                variables.insert("OS_VERSION".to_string(), os_name);
+
+                if is_verbose {
+                    println!("[Indy Engine] Imported OS_VERSION: {}", variables.get("OS_VERSION").unwrap());
+                }
+            } else {
+                eprintln!("[Error] Unknown import target: '{}'. Only 'import OS_VERSION' is supported.", target);
             }
         },
         // Handles variable assignment like: Name="bob"
