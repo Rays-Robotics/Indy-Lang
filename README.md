@@ -1,5 +1,6 @@
 # Indy-Lang  
 **I.N.D.Y. = I’m Not Doing YAML**
+**(Also another way to say indie)**
 
 **WARNING: THIS IS IN EARLY DEVELOPMENT AND CANNOT DO A LOT OF THINGS YET. USE AT YOUR OWN RISK.**
 
