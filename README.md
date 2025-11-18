@@ -24,18 +24,55 @@ Indy-Lang is a blazing fast, ultra-simple programming language built on Rust. It
 ```indy
 start
 
-prompt Name="Hello! What's your name?"
+RR="Rays Robotics"
 
-say "Thanks {Name}! Welcome to Indy-Lang."
+H="Hello"
+
+TY="Thank you"
+
+IL="Indy-Lang"
+
+CMD1="ls"
+
+prompt Name="Whats your name?"
+
+say "{H} {Name}!"
 
 wait 2
 
-say "You can print, loop (WIP), prompt, and even make web apps (WIP)."
+say "Now its time to test commands!"
+
+wait 2
+
+run "{CMD1}"
+
+wait 2
+
+say "The ls command worked!! Now lets test loops."
+
+wait 2
+
+loop 5
+
+say "Knock, knock. Who’s there? Banana. Banana who?"
+
+wait 1
+
+end loop
+
+wait 1
+
+say "ORANGE YOU GLAD I DIDN’T SAY BANANA!"
+
+wait 2
+
+say "{Name}, {TY} for testing {IL} by {RR}!"
 
 end
+
 ````
 
-This script shows the basics: prompting, printing, waiting, and variable interpolation.
+This script shows the basics.
 
 ---
 
