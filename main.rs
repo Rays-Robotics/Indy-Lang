@@ -3,9 +3,22 @@ use std::thread;
 use std::time::Duration;
 use std::env;
 use std::io::{self, Write};
+use std::process::Command;
 
 // --- CONFIGURATION ---
-const INDY_VERSION: &str = "0.5.2-fix-e0716";
+const INDY_VERSION: &str = "0.6.3-fix-loop-move";
+
+// --- DATA STRUCTURES ---
+
+/// Stores the state required for an active loop block.
+// FIX: Add Copy and Clone traits to prevent the "use of moved value" error (E0382)
+// when pushing the frame back onto the stack and immediately reading from it.
+#[derive(Debug, Clone, Copy)]
+struct LoopFrame {
+    start_line_index: usize,
+    max_iterations: usize,
+    current_iteration: usize,
+}
 
 // --- HELPER FUNCTIONS ---
 
@@ -29,6 +42,33 @@ fn clean_string_value(s: &str) -> String {
         value.remove(0);
     }
     value
+}
+
+/// Splits a string into shell-like arguments, respecting single quotes ('). 
+/// The quotes themselves are stripped from the resulting arguments.
+fn split_shell_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current_arg = String::new();
+    let mut in_quote = false;
+
+    for c in s.chars() {
+        if c == '\'' {
+            in_quote = !in_quote;
+            // Do not add the quote character itself to the argument string
+        } else if c.is_whitespace() && !in_quote {
+            if !current_arg.is_empty() {
+                args.push(current_arg.clone());
+            }
+            current_arg.clear();
+        } else {
+            current_arg.push(c);
+        }
+    }
+    if !current_arg.is_empty() {
+        args.push(current_arg);
+    }
+    
+    args
 }
 
 // --- CONTROL FLOW UTILITIES ---
@@ -69,7 +109,6 @@ fn evaluate_condition(condition_str: &str, variables: &HashMap<String, String>) 
     let left_value = variables.get(left).map(|s| s.as_str()).unwrap_or("");
     
     // 2. Get the value of the right-hand side (can be a variable or a literal)
-    // FIX: Introduce a long-lived variable `literal_value` if `right` is not a variable.
     let literal_value;
     let right_value: &str = if variables.contains_key(right) {
         variables.get(right).unwrap().as_str()
@@ -87,7 +126,7 @@ fn evaluate_condition(condition_str: &str, variables: &HashMap<String, String>) 
     }
 }
 
-// Finds the index of the next instruction after a failed conditional block (either 'else' or 'end if')
+/// Finds the index of the next instruction after a failed conditional block (either 'else' or 'end if')
 fn find_next_if_skip_target(lines: &[&str], start_index: usize) -> usize {
     let mut depth = 1;
     for i in (start_index + 1)..lines.len() {
@@ -121,8 +160,9 @@ fn execute_line(line: &str, variables: &mut HashMap<String, String>, is_verbose:
 
     match command {
         "say" => {
-            let raw_message = trimmed_line
-                .trim_start_matches(command)
+            // Use the cleaner strip_prefix method
+            let raw_message = trimmed_line.strip_prefix(command)
+                .unwrap_or("")
                 .trim_start();
             
             let message = clean_string_value(raw_message);
@@ -169,6 +209,43 @@ fn execute_line(line: &str, variables: &mut HashMap<String, String>, is_verbose:
                 eprintln!("[Error] 'prompt' command syntax is incorrect. Use: prompt VAR=\"Message\"");
             }
         },
+        "run" => {
+            // 1. Isolate the quoted command argument and clean the quotes
+            let raw_args = trimmed_line.trim_start_matches("run").trim();
+            let cleaned_cmd_arg = clean_string_value(raw_args);
+            
+            // 2. Perform interpolation on the command string
+            let interpolated_cmd = interpolate_string(&cleaned_cmd_arg, variables);
+
+            if interpolated_cmd.is_empty() {
+                eprintln!("[Run Error] 'run' requires a quoted command string.");
+                return;
+            }
+
+            // 3. Split into command and arguments using the shell-like parser
+            let cmd_parts = split_shell_args(&interpolated_cmd);
+            let cmd = &cmd_parts[0];
+            // Arguments are the elements after the command name. 
+            let args_refs: Vec<&str> = cmd_parts[1..].iter().map(|s| s.as_str()).collect();
+
+            if is_verbose {
+                println!("[Indy Engine] Running system command: '{}' with args: {:?}", cmd, args_refs);
+            }
+
+            // 4. Execute the system command
+            match Command::new(cmd).args(args_refs).output() {
+                Ok(output) => {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        print!("{}", stdout);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("[Run Error] Command failed (Exit code: {:?}): {}", output.status.code(), stderr);
+                    }
+                },
+                Err(e) => eprintln!("[Run Error] Could not execute command '{}': {}", cmd, e),
+            }
+        },
         // Handles variable assignment like: Name="bob"
         _ if trimmed_line.contains('=') => {
             if let Some((name, value_str)) = trimmed_line.split_once('=') {
@@ -201,6 +278,10 @@ fn run_indy_script_content(script_content: &str, variables: &mut HashMap<String,
     
     // Stack to manage whether we are currently inside an active control flow block (e.g., executing the true path of an IF)
     let mut block_execution_stack: Vec<bool> = vec![true]; // Starts as true (global execution)
+    
+    // Stack to manage loop execution state for jumps
+    let mut loop_stack: Vec<LoopFrame> = Vec::new();
+
 
     while line_num < lines.len() {
         let line = lines[line_num];
@@ -228,6 +309,7 @@ fn run_indy_script_content(script_content: &str, variables: &mut HashMap<String,
         let is_current_block_active = *block_execution_stack.last().unwrap_or(&true);
 
         // --- Control Flow Logic ---
+        
         if trimmed_line.starts_with("if ") {
             let condition_str = trimmed_line.trim_start_matches("if ").trim();
             let is_condition_true = evaluate_condition(condition_str, variables);
@@ -258,19 +340,60 @@ fn run_indy_script_content(script_content: &str, variables: &mut HashMap<String,
             }
         } else if trimmed_line == "end if" {
             block_execution_stack.pop();
+
         } else if trimmed_line.starts_with("loop ") {
-            // MVP SIMULATION: True loop execution requires multi-pass/recursive execution, 
-            // which complicates the single-pass runner heavily. We simulate the jump by skipping the block.
             if is_current_block_active {
+                let loop_args = trimmed_line.trim_start_matches("loop ").trim();
+                
+                // Interpolate loop argument
+                let interpolated_args = interpolate_string(loop_args, variables);
+                
+                // Simplified loop argument parsing (only supports integer count for now)
+                let count = interpolated_args.parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("[Error] 'loop' requires a positive integer count. Defaulting to 1.");
+                    1
+                });
+                
                 if is_verbose {
-                    println!("[Indy Engine] Loop encountered. (Simulation: Skipping block to continue execution)");
+                    println!("[Indy Engine] Starting loop ({} iterations) at line {}", count, line_num);
                 }
-                // Skip the loop body for simulation
+                
+                // Push the new loop frame onto the stack
+                loop_stack.push(LoopFrame {
+                    start_line_index: line_num + 1, // Store index of line AFTER 'loop' command
+                    max_iterations: count,
+                    current_iteration: 0,
+                });
+            } else {
+                // Parent block is inactive, so skip the whole loop body
                 line_num = find_matching_end(lines.as_slice(), line_num, "loop");
                 continue;
             }
+
         } else if trimmed_line == "end loop" {
-            // No action needed for simulated loop end
+            if let Some(mut frame) = loop_stack.pop() {
+                if frame.current_iteration < frame.max_iterations - 1 {
+                    // Loop is not finished: increment counter, push frame back, and jump
+                    frame.current_iteration += 1;
+                    if is_verbose {
+                        println!("[Indy Engine] Looping back to line {} (Iteration {}/{})", 
+                                frame.start_line_index, frame.current_iteration + 1, frame.max_iterations);
+                    }
+                    // Since LoopFrame now implements Copy, this push uses a copy, 
+                    // allowing frame to still be used on the next line.
+                    loop_stack.push(frame); 
+                    line_num = frame.start_line_index; // Jump directly to the first instruction inside the loop
+                    continue; // Skip line_num += 1, as line_num was manually set
+                } else {
+                    // Loop finished. Just continue linear execution.
+                    if is_verbose {
+                         println!("[Indy Engine] Loop finished.");
+                    }
+                }
+            } else {
+                eprintln!("[Error] 'end loop' without matching 'loop' found.");
+            }
+        
         } else if trimmed_line == "end" {
             if is_verbose { println!("[Indy Engine] Script finished."); }
             return true; 
